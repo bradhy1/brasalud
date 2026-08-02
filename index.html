@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="es-PE">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#0a1520" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>Brasalud - Caja</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+
+<style>
+  * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #0a1520;
+    color: #e8f5f2;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior-y: none;
+  }
+  #root { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom); }
+
+  /* Pantalla de carga: se tapa sola cuando React monta */
+  #carga {
+    position: fixed; inset: 0; z-index: 9999;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; background: #0a1520;
+  }
+  #carga .marca { font-size: 22px; font-weight: 700; color: #00d4aa; letter-spacing: 1px; }
+  #carga .nota { font-size: 13px; color: #6b8a96; }
+  #carga .barra { width: 140px; height: 3px; background: #16293a; border-radius: 2px; overflow: hidden; }
+  #carga .barra i { display: block; width: 40%; height: 100%; background: #00d4aa; animation: corre 1.1s ease-in-out infinite; }
+  @keyframes corre { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+  @media (prefers-reduced-motion: reduce) { #carga .barra i { animation: none; width: 100%; } }
+
+  /* Boton flotante para mantener la pantalla encendida */
+  #btnLuz {
+    position: fixed; right: 14px; bottom: 18px; z-index: 9000;
+    width: 52px; height: 52px; border-radius: 26px;
+    border: 1px solid #1e3a4d; background: #12283a; color: #6b8a96;
+    font-size: 21px; cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0,0,0,.45);
+  }
+  #btnLuz[data-on="1"] { background: #00d4aa; color: #04121a; border-color: #00d4aa; }
+</style>
+</head>
+<body>
+
+<div id="carga">
+  <div class="marca">BRASALUD</div>
+  <div class="barra"><i></i></div>
+  <div class="nota">Cargando caja...</div>
+</div>
+
+<div id="root"></div>
+
+<button id="btnLuz" data-on="0" title="Mantener pantalla encendida" aria-label="Mantener pantalla encendida">☀</button>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* ==========================================================
+   BRASALUD v12 — codigo de Hugo.
+   Cambios respecto al artefacto de Claude:
+     - se quito el import de react (ya viene cargado arriba)
+     - se quito el export default
+     - window.storage -> localStorage (window.storage solo
+       existe dentro del visor de Claude; aqui no)
+   ========================================================== */
+
+// ═══════════════════════════════════════════════
+//  BRASALUD — Sistema de caja para botica + tienda
+//  v9 — Sin agente BCP, con Faltantes (Botica/Tienda)
+// ═══════════════════════════════════════════════
+
+const VERSION = "v11 · cierre automático y sin pérdida";
+
+const KEYS = {
+  ventas: "bs_ventas", gastos: "bs_gastos",
+  hist: "bs_hist", user: "bs_user",
+  ventasHist: "bs_ventas_hist",
+  faltantesBotica: "bs_falt_botica",
+  faltantesTienda: "bs_falt_tienda",
+  fondosHist: "bs_fondos_hist"
+};
+
+const fmt = (n) => "S/ " + Math.abs(parseFloat(n) || 0).toFixed(2);
+const fechaHoy = () => new Date().toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "2-digit" });
+const hora = () => new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
+const fechaLarga = () => new Date().toLocaleDateString("es-PE", { weekday: "long", day: "2-digit", month: "long" });
+
+async function get(key) {
+  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : null; } catch { return null; }
+}
+async function set(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch { return false; }
+}
+
+function Toast({ msg, onDone }) {
+  useEffect(() => { const t = setTimeout(onDone, 2200); return () => clearTimeout(t); }, []);
+  return <div style={{ position:"fixed", bottom:28, left:"50%", transform:"translateX(-50%)", background:"#00d4aa", color:"#0a1520", padding:"11px 22px", borderRadius:24, fontWeight:800, fontSize:13, zIndex:999, boxShadow:"0 4px 20px #00d4aa44" }}>{msg}</div>;
+}
+
+function minsDesde(ts) {
+  if (!ts) return null;
+  return Math.floor((Date.now() - ts) / 60000);
+}
+
+function Brasalud() {
+  const [tab, setTab] = useState("ventas");
+  const [loading, setLoading] = useState(true);
+  const [estadoGuardado, setEstadoGuardado] = useState("ok");
+  const [toast, setToast] = useState(null);
+  const [usuario, setUsuario] = useState(null);
+  const [nombreInput, setNombreInput] = useState("");
+
+  const [ventas, setVentas] = useState([]);
+  const [gastos, setGastos] = useState([]);
+  const [historial, setHistorial] = useState([]);
+  const [ventasHist, setVentasHist] = useState({});
+  const [diaDetalle, setDiaDetalle] = useState(null);
+
+  const [ahora, setAhora] = useState(Date.now());
+  const [lastVentaTs, setLastVentaTs] = useState(null);
+
+  const [vNom, setVNom] = useState(""); const [vPre, setVPre] = useState("");
+  const [vCos, setVCos] = useState(""); const [vCan, setVCan] = useState("1");
+  const [gNom, setGNom] = useState(""); const [gMon, setGMon] = useState("");
+  const [cTC, setCTC] = useState(""); const [cOtr, setCOtr] = useState("");
+  const [cierre, setCierre] = useState(null);
+
+  // Faltantes — 2 secciones
+  const [faltSeccion, setFaltSeccion] = useState("botica"); // "botica" | "tienda"
+  const [faltantesBotica, setFaltantesBotica] = useState([]);
+  const [faltantesTienda, setFaltantesTienda] = useState([]);
+  const [faltNom, setFaltNom] = useState("");
+
+  // Fondos Agente/Botica — solo anotación manual, sin cálculos automáticos
+  const [fondosHist, setFondosHist] = useState([]);
+  const [fAgenteCuenta, setFAgenteCuenta] = useState("");
+  const [fAgenteEfvo, setFAgenteEfvo] = useState("");
+  const [fBotica, setFBotica] = useState("");
+  const [fYapeLucy, setFYapeLucy] = useState("");
+  const [fYapeHugo, setFYapeHugo] = useState("");
+
+  const [modalNuevoDia, setModalNuevoDia] = useState(false);
+  const [claveInput, setClaveInput] = useState("");
+  const [claveError, setClaveError] = useState(false);
+  const CLAVE_BORRAR = "2580";
+
+  const msg = (m) => setToast(m);
+
+  useEffect(() => {
+    (async () => {
+      let intentos = 0;
+      let datos = null;
+      while (intentos < 3) {
+        try {
+          datos = await Promise.all([
+            get(KEYS.ventas), get(KEYS.gastos), get(KEYS.hist), get(KEYS.user),
+            get(KEYS.ventasHist), get(KEYS.faltantesBotica), get(KEYS.faltantesTienda), get(KEYS.fondosHist)
+          ]);
+          break;
+        } catch {
+          intentos++;
+          await new Promise(r => setTimeout(r, 800));
+        }
+      }
+      if (datos) {
+        const [v, g, h, u, vh, fb, ft, fh] = datos;
+        if (v) setVentas(v);
+        if (g) setGastos(g);
+        if (u) setUsuario(u);
+        if (fb) setFaltantesBotica(fb);
+        if (ft) setFaltantesTienda(ft);
+        if (fh) setFondosHist(fh);
+
+        // ── PRECARGA con datos reales del sistema anterior del usuario ──
+        // Solo se aplica si NO hay datos aún, para no duplicar ni pisar
+        // información real que ya se haya guardado en esta instancia.
+
+        // Historial completo (2 días, según captura de Historial)
+        const HIST_PRECARGA = [
+          { fecha: "31/07/26", gan: "267.50", ventas: "267.50", items: 2 },
+          { fecha: "30/07/25", gan: "164.50", ventas: "164.50", items: 14 }
+        ];
+        const VENTAS_PRECARGA_JUEVES = [
+          { nombre: "Shampoo", precio: 2.00, costo: 0, cantidad: 1, hora: "10:45 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Coca cola", precio: 3.00, costo: 0, cantidad: 1, hora: "10:04 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Gallo+apro", precio: 5.50, costo: 0, cantidad: 1, hora: "10:03 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Sublime", precio: 3.00, costo: 0, cantidad: 1, hora: "10:03 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Sencillo", precio: 1.00, costo: 0, cantidad: 1, hora: "09:57 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Dolo", precio: 3.50, costo: 0, cantidad: 1, hora: "09:57 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Apro", precio: 2.00, costo: 0, cantidad: 1, hora: "09:54 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Gallo", precio: 3.50, costo: 0, cantidad: 1, hora: "09:54 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Pañal", precio: 2.00, costo: 0, cantidad: 1, hora: "09:50 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Sax2", precio: 3.00, costo: 0, cantidad: 1, hora: "09:36 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Vick", precio: 4.00, costo: 0, cantidad: 1, hora: "09:36 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Portil", precio: 9.00, costo: 0, cantidad: 1, hora: "09:29 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Yape", precio: 2.00, costo: 0, cantidad: 1, hora: "09:27 p.m.", fecha: "30/07/25", quien: "B" },
+          { nombre: "Ventas del día (resto)", precio: 121.00, costo: 0, cantidad: 1, hora: "09:21 p.m.", fecha: "30/07/25", quien: "B" },
+        ];
+
+        if (!h || h.length === 0) {
+          setHistorial(HIST_PRECARGA);
+          setVentasHist({ "30/07/25": { ventas: VENTAS_PRECARGA_JUEVES, gastos: [] } });
+          set(KEYS.hist, HIST_PRECARGA);
+          set(KEYS.ventasHist, { "30/07/25": { ventas: VENTAS_PRECARGA_JUEVES, gastos: [] } });
+        } else {
+          setHistorial(h);
+          if (vh) setVentasHist(vh);
+        }
+
+        // Nota: las ventas del 31/07 ya quedaron cerradas en el historial.
+        // Hoy (01/08) arranca limpio, sin ventas precargadas.
+
+
+        // Faltantes Botica (3 ítems reales, sección Tienda queda vacía)
+        if (!fb || fb.length === 0) {
+          const FALT_BOTICA_PRECARGA = [
+            { id: "falt_1", nombre: "Aquanax gota", hora: "12:03 p. m.", fecha: fechaHoy(), quien: "H" },
+            { id: "falt_2", nombre: "Portil", hora: "09:24 a. m.", fecha: fechaHoy(), quien: "H" },
+            { id: "falt_3", nombre: "Doloneurobion", hora: "09:24 a. m.", fecha: fechaHoy(), quien: "H" },
+          ];
+          setFaltantesBotica(FALT_BOTICA_PRECARGA);
+          set(KEYS.faltantesBotica, FALT_BOTICA_PRECARGA);
+        }
+
+        // ── PRECARGA: conteos de fondos del 31/07 ──
+        if (!fh || fh.length === 0) {
+          const FONDOS_PRECARGA = [
+            {
+              id: "precarga_2330", fecha: "31/07/26", hora: "11:30 p. m.", quien: usuario || "H",
+              // desglose corregido: la cuenta del banco marcaba 3076.27 y el
+              // efectivo restante 2411.23 (total 5487.50, igual que el guardado)
+              agenteCuenta: 3076.27, agenteEfvo: 2411.23, agenteTotal: 5487.50,
+              botica: 1738.00, yapeLucy: 507.00, yapeHugo: 296.00, boticaTotal: 2541.00
+            },
+            {
+              id: "precarga_inicial", fecha: "31/07/26", hora: "04:00 p. m.", quien: usuario || "H",
+              agenteCuenta: 2917.00, agenteEfvo: 2251.50, agenteTotal: 5168.50,
+              botica: 1881.50, yapeLucy: 700.00, yapeHugo: 200.00, boticaTotal: 2781.50
+            }
+          ];
+          setFondosHist(FONDOS_PRECARGA);
+          set(KEYS.fondosHist, FONDOS_PRECARGA);
+        }
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const [yaInicializado, setYaInicializado] = useState(false);
+  useEffect(() => {
+    if (!loading) {
+      const t = setTimeout(() => setYaInicializado(true), 300);
+      return () => clearTimeout(t);
+    }
+  }, [loading]);
+
+  // ── CIERRE AUTOMÁTICO ──
+  // Al abrir la app, si hay ventas de días ANTERIORES que nunca se cerraron,
+  // se cierran solas y pasan al historial. Así nunca se pierde un día por
+  // olvidar tocar "Guardar día".
+  const [yaAutoCerro, setYaAutoCerro] = useState(false);
+  useEffect(() => {
+    if (!yaInicializado || yaAutoCerro || ventas.length === 0) return;
+    const hoy = fechaHoy();
+    // fechas distintas a hoy que tengan ventas
+    const fechasPendientes = [...new Set(ventas.map(v => v.fecha))].filter(f => f && f !== hoy);
+    if (fechasPendientes.length === 0) { setYaAutoCerro(true); return; }
+
+    let cerrados = 0;
+    fechasPendientes.forEach(f => {
+      const ventasDeEsaFecha = ventas.filter(v => v.fecha === f);
+      // si ya está en el historial con el mismo número de ítems, no lo re-cierra
+      const yaEnHist = historial.find(h => h.fecha === f);
+      if (yaEnHist && Number(yaEnHist.items) === ventasDeEsaFecha.length) return;
+      guardarCierreDeFecha(f, ventasDeEsaFecha, [], 0, 0, true);
+      cerrados++;
+    });
+    if (cerrados > 0) msg(`🌙 ${cerrados} día(s) anterior(es) cerrado(s) automáticamente`);
+    setYaAutoCerro(true);
+  }, [yaInicializado, ventas, historial, yaAutoCerro]);
+
+  const guardarConEstado = async (key, val) => {
+    setEstadoGuardado("guardando");
+    let ok = await set(key, val);
+    if (!ok) { await new Promise(r => setTimeout(r, 600)); ok = await set(key, val); }
+    setEstadoGuardado(ok ? "ok" : "error");
+  };
+
+  useEffect(() => { if (yaInicializado) set(KEYS.gastos, gastos); }, [gastos]);
+  useEffect(() => { if (yaInicializado) set(KEYS.hist, historial); }, [historial]);
+  useEffect(() => { if (yaInicializado) set(KEYS.ventasHist, ventasHist); }, [ventasHist]);
+  useEffect(() => { if (yaInicializado) set(KEYS.faltantesBotica, faltantesBotica); }, [faltantesBotica]);
+  useEffect(() => { if (yaInicializado) set(KEYS.faltantesTienda, faltantesTienda); }, [faltantesTienda]);
+  useEffect(() => { if (yaInicializado) set(KEYS.fondosHist, fondosHist); }, [fondosHist]);
+
+  useEffect(() => {
+    const t = setInterval(() => setAhora(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    if (!yaInicializado) return;
+    const t = setInterval(async () => {
+      const v = await get(KEYS.ventas);
+      if (v) setVentas(v);
+      const fb = await get(KEYS.faltantesBotica);
+      if (fb) setFaltantesBotica(fb);
+      const ft = await get(KEYS.faltantesTienda);
+      if (ft) setFaltantesTienda(ft);
+    }, 20000);
+    return () => clearInterval(t);
+  }, [yaInicializado]);
+
+  const entrar = () => { const n = nombreInput.trim(); if (!n) return; setUsuario(n); set(KEYS.user, n); };
+
+  const addVenta = async () => {
+    if (!vNom || !vPre) return msg("⚠️ Ingresa producto y precio");
+    const nueva = { id: Date.now() + "_" + Math.random().toString(36).slice(2,7), nombre: vNom, precio: +vPre, costo: +vCos||0, cantidad: +vCan||1, hora: hora(), fecha: fechaHoy(), quien: usuario };
+    setVNom(""); setVPre(""); setVCos(""); setVCan("1");
+    setEstadoGuardado("guardando");
+    let actual = await get(KEYS.ventas);
+    if (!actual) actual = [];
+    const actualizado = [nueva, ...actual];
+    let ok = await set(KEYS.ventas, actualizado);
+    if (!ok) { await new Promise(r => setTimeout(r, 600)); ok = await set(KEYS.ventas, actualizado); }
+    setVentas(actualizado);
+    setEstadoGuardado(ok ? "ok" : "error");
+    const ts = Date.now();
+    setLastVentaTs(ts);
+    msg(ok ? "✅ Venta registrada" : "⚠️ No se pudo guardar — reintenta");
+  };
+
+  const eliminarVenta = async (ventaAEliminar) => {
+    setEstadoGuardado("guardando");
+    let actual = await get(KEYS.ventas);
+    if (!actual) actual = ventas;
+    const actualizado = ventaAEliminar.id
+      ? actual.filter(v => v.id !== ventaAEliminar.id)
+      : actual.filter(v => !(v.nombre === ventaAEliminar.nombre && v.hora === ventaAEliminar.hora && v.quien === ventaAEliminar.quien));
+    let ok = await set(KEYS.ventas, actualizado);
+    if (!ok) { await new Promise(r => setTimeout(r, 600)); ok = await set(KEYS.ventas, actualizado); }
+    setVentas(actualizado);
+    setEstadoGuardado(ok ? "ok" : "error");
+  };
+
+  const addGasto = () => {
+    if (!gNom || !gMon) return msg("⚠️ Ingresa descripción y monto");
+    setGastos(p => [{ nombre: gNom, monto: +gMon, hora: hora(), quien: usuario }, ...p]);
+    setGNom(""); setGMon(""); msg("✅ Gasto registrado");
+  };
+
+  // ── FALTANTES ──
+  const addFaltante = async () => {
+    if (!faltNom.trim()) return msg("⚠️ Ingresa el producto que falta");
+    const nuevo = { id: Date.now() + "_" + Math.random().toString(36).slice(2,7), nombre: faltNom.trim(), hora: hora(), fecha: fechaHoy(), quien: usuario };
+    const key = faltSeccion === "botica" ? KEYS.faltantesBotica : KEYS.faltantesTienda;
+    const setterLocal = faltSeccion === "botica" ? setFaltantesBotica : setFaltantesTienda;
+    setFaltNom("");
+    let actual = await get(key);
+    if (!actual) actual = [];
+    const actualizado = [nuevo, ...actual];
+    let ok = await set(key, actualizado);
+    if (!ok) { await new Promise(r => setTimeout(r, 600)); ok = await set(key, actualizado); }
+    setterLocal(actualizado);
+    msg(ok ? "✅ Agregado a faltantes" : "⚠️ No se pudo guardar");
+  };
+
+  const quitarFaltante = async (item, seccion) => {
+    const key = seccion === "botica" ? KEYS.faltantesBotica : KEYS.faltantesTienda;
+    const setterLocal = seccion === "botica" ? setFaltantesBotica : setFaltantesTienda;
+    let actual = await get(key);
+    if (!actual) actual = seccion === "botica" ? faltantesBotica : faltantesTienda;
+    const actualizado = actual.filter(f => f.id !== item.id);
+    await set(key, actualizado);
+    setterLocal(actualizado);
+    msg("✅ Ya lo compraste — quitado de faltantes");
+  };
+
+  // ── FONDOS: solo anotación manual de lo que contaste, no cálculo automático ──
+  const registrarFondos = async () => {
+    if (!fAgenteCuenta && !fAgenteEfvo && !fBotica && !fYapeLucy && !fYapeHugo) return msg("⚠️ Ingresa al menos un monto");
+    const ac = +fAgenteCuenta || 0, ae = +fAgenteEfvo || 0, b = +fBotica || 0;
+    const yl = +fYapeLucy || 0, yh = +fYapeHugo || 0;
+    const reg = {
+      id: Date.now() + "_" + Math.random().toString(36).slice(2,7),
+      fecha: fechaHoy(), hora: hora(), quien: usuario,
+      agenteCuenta: ac, agenteEfvo: ae, agenteTotal: ac + ae,
+      botica: b, yapeLucy: yl, yapeHugo: yh, boticaTotal: b + yl + yh
+    };
+    setFAgenteCuenta(""); setFAgenteEfvo(""); setFBotica(""); setFYapeLucy(""); setFYapeHugo("");
+    let actual = await get(KEYS.fondosHist);
+    if (!actual) actual = [];
+    const actualizado = [reg, ...actual].slice(0, 60);
+    let ok = await set(KEYS.fondosHist, actualizado);
+    if (!ok) { await new Promise(r => setTimeout(r, 600)); ok = await set(KEYS.fondosHist, actualizado); }
+    setFondosHist(actualizado);
+    msg(ok ? "✅ Conteo guardado" : "⚠️ No se pudo guardar");
+  };
+
+  const calcCierre = () => {
+    const hoyV = ventas.filter(v => v.fecha === fechaHoy());
+    const tV = hoyV.reduce((s,v) => s + v.precio * v.cantidad, 0);
+    const tC = hoyV.reduce((s,v) => s + v.costo * v.cantidad, 0);
+    const tG = gastos.reduce((s,g) => s + g.monto, 0);
+    const tc = +cTC||0, otr = +cOtr||0;
+    setCierre({ tV, tC, tG, tc, otr, margen: tV-tC, gan: tV-tC-tG-tc-otr, itemsHoy: hoyV.length, hoyV });
+  };
+
+  // Guarda/actualiza el cierre de una fecha. SEGURO ante re-cierres:
+  // siempre recalcula desde TODAS las ventas de esa fecha, así si cierras
+  // a las 11:00 y vendes algo a las 11:10, al volver a cerrar se suma
+  // en vez de reemplazar el cierre anterior.
+  const guardarCierreDeFecha = (fecha, ventasDeEseDia, gastosDeEseDia, tc, otr, silencioso) => {
+    const tVf = ventasDeEseDia.reduce((s,v) => s + v.precio * v.cantidad, 0);
+    const tCf = ventasDeEseDia.reduce((s,v) => s + v.costo * v.cantidad, 0);
+    const tGf = gastosDeEseDia.reduce((s,g) => s + g.monto, 0);
+    const ganf = tVf - tCf - tGf - (+tc||0) - (+otr||0);
+    const reg = { fecha, gan: ganf.toFixed(2), ventas: tVf.toFixed(2), items: ventasDeEseDia.length };
+    setHistorial(p => {
+      const nuevo = [reg, ...p.filter(h => h.fecha !== fecha)];
+      // ordena por fecha más reciente primero (dd/mm/yy)
+      return nuevo.slice(0,60);
+    });
+    setVentasHist(p => ({ ...p, [fecha]: { ventas: [...ventasDeEseDia], gastos: [...gastosDeEseDia] } }));
+    if (!silencioso) msg("💾 Día guardado — puedes seguir vendiendo, se actualiza solo");
+    return ganf;
+  };
+
+  const guardarDia = () => {
+    if (!cierre) return;
+    const fecha = fechaHoy();
+    const ventasDelDia = ventas.filter(v => v.fecha === fecha);
+    guardarCierreDeFecha(fecha, ventasDelDia, gastos, cTC, cOtr, false);
+    setCierre(null);
+    setTab("historial");
+  };
+
+  const confirmarNuevoDia = () => {
+    if (claveInput.trim() !== CLAVE_BORRAR) { setClaveError(true); setClaveInput(""); return; }
+    setVentas([]); setGastos([]);
+    setCTC(""); setCOtr(""); setCierre(null);
+    setModalNuevoDia(false); setClaveInput(""); setClaveError(false);
+    set(KEYS.ventas, []);
+    setTab("ventas"); msg("🔄 Nuevo día iniciado");
+  };
+
+  const ventasHoy = ventas.filter(v => v.fecha === fechaHoy());
+  const tV = ventasHoy.reduce((s,v) => s + v.precio * v.cantidad, 0);
+  const tC = ventasHoy.reduce((s,v) => s + v.costo * v.cantidad, 0);
+  const tG = gastos.reduce((s,g) => s + g.monto, 0);
+  const tMes = historial.reduce((s,h) => s + parseFloat(h.gan), 0);
+  const prom = historial.length ? tMes / historial.length : 0;
+  const mejor = historial.length ? Math.max(...historial.map(h => parseFloat(h.gan))) : 0;
+
+  const minsUltimaVenta = minsDesde(lastVentaTs);
+  const horaActualNum = new Date().getHours();
+  const enHorarioComercial = horaActualNum >= 8 && horaActualNum < 21;
+  const mostrarAlerta = enHorarioComercial && (minsUltimaVenta === null ? false : minsUltimaVenta >= 90);
+  const nivelAlerta = minsUltimaVenta >= 180 ? "alto" : "medio";
+
+  const c = {
+    app: { background:"#0a1520", minHeight:"100vh", color:"#e8f0f8", fontFamily:"system-ui,sans-serif", paddingBottom:90 },
+    page: { padding:16 },
+    hdr: { textAlign:"center", padding:"18px 0 22px" },
+    h2: { fontSize:19, fontWeight:800, color:"#00d4aa" },
+    sub: { fontSize:12, color:"#4a6580", marginTop:3 },
+    card: { background:"#152030", borderRadius:14, padding:16, marginBottom:14, border:"1px solid #1e3348" },
+    cTit: { fontSize:11, fontWeight:700, letterSpacing:1.5, textTransform:"uppercase", color:"#4a6580", marginBottom:14, display:"flex", alignItems:"center", gap:8 },
+    lbl: { display:"block", fontSize:12, color:"#4a6580", marginBottom:5 },
+    inp: { width:"100%", background:"#0a1520", border:"1px solid #1e3348", borderRadius:8, padding:"11px 14px", color:"#e8f0f8", fontSize:15, outline:"none", marginBottom:12 },
+    g2: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 },
+    g3: { display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 },
+    btn: { width:"100%", padding:14, background:"#00d4aa", color:"#0a1520", border:"none", borderRadius:12, fontSize:15, fontWeight:800, cursor:"pointer", marginBottom:12 },
+    btnS: { width:"100%", padding:12, background:"transparent", color:"#4a6580", border:"1px solid #1e3348", borderRadius:10, fontSize:13, cursor:"pointer", marginBottom:12 },
+    btnX: { padding:"6px 10px", background:"#ef444420", color:"#f87171", border:"1px solid #ef444440", borderRadius:8, fontSize:12, cursor:"pointer" },
+    btnCheck: { padding:"6px 10px", background:"#00d4aa20", color:"#00d4aa", border:"1px solid #00d4aa40", borderRadius:8, fontSize:12, cursor:"pointer" },
+    row: { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"9px 0", borderBottom:"1px solid #1a3050", fontSize:14 },
+    emp: { textAlign:"center", color:"#2a4060", fontSize:13, padding:"20px 0" },
+    bdg: (clr) => ({ display:"inline-block", padding:"2px 9px", borderRadius:20, fontSize:10, fontWeight:700, background:clr+"22", color:clr }),
+    tip: (clr) => ({ background:"#1a3050", borderRadius:10, padding:12, marginBottom:14, fontSize:12, color:"#7a9fc0", lineHeight:1.6, borderLeft:"3px solid "+clr }),
+    big: (p) => ({ borderRadius:14, padding:20, textAlign:"center", marginBottom:14, background:p?"#00d4aa12":"#ef444412", border:"1px solid "+(p?"#00d4aa33":"#ef444433") }),
+    bigL: (p) => ({ fontSize:11, fontWeight:700, letterSpacing:1.5, textTransform:"uppercase", color:p?"#00d4aa":"#f87171", marginBottom:8 }),
+    bigN: (p) => ({ fontSize:40, fontWeight:900, color:p?"#00d4aa":"#f87171" }),
+    segTab: (a) => ({ flex:1, padding:"10px 4px", textAlign:"center", fontSize:12, fontWeight:700, color:a?"#00d4aa":"#4a6580", background:a?"#00d4aa15":"transparent", borderRadius:10, cursor:"pointer", border:a?"1px solid #00d4aa40":"1px solid #1e3348" }),
+  };
+
+  if (loading) return <div style={{...c.app, display:"flex", alignItems:"center", justifyContent:"center", height:"100vh"}}><div style={{textAlign:"center"}}><div style={{fontSize:48, marginBottom:12}}>💊</div><div style={{color:"#00d4aa", fontWeight:700}}>Cargando Brasalud...</div></div></div>;
+
+  if (!usuario) return (
+    <div style={{...c.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
+      <div style={{textAlign:"center", padding:32, width:"100%", maxWidth:340}}>
+        <div style={{fontSize:56, marginBottom:12}}>💊</div>
+        <div style={{fontSize:26, fontWeight:800, color:"#00d4aa", marginBottom:4}}>Brasalud</div>
+        <div style={{fontSize:13, color:"#4a6580", marginBottom:8}}>Botica + Tienda</div>
+        <div style={{fontSize:10, color:"#2d4a6a", marginBottom:28}}>🏷️ Versión: {VERSION}</div>
+        <div style={{fontSize:15, color:"#7a9fc0", marginBottom:8, fontWeight:600}}>¿Cómo te llamas?</div>
+        <div style={{fontSize:12, color:"#4a6580", marginBottom:20}}>Tu nombre aparecerá en cada registro</div>
+        <input style={{...c.inp, textAlign:"center", fontSize:20}} placeholder="Ej: Hugo, Lucy..." value={nombreInput} onChange={e => setNombreInput(e.target.value)} onKeyDown={e => e.key==="Enter" && entrar()} autoFocus />
+        <button style={c.btn} onClick={entrar}>Entrar al sistema →</button>
+      </div>
+    </div>
+  );
+
+  if (diaDetalle) {
+    const datos = ventasHist[diaDetalle] || { ventas: [], gastos: [] };
+    const totalDia = datos.ventas.reduce((s,v) => s + v.precio * v.cantidad, 0);
+    const costosDia = datos.ventas.reduce((s,v) => s + v.costo * v.cantidad, 0);
+    return (
+      <div style={c.app}>
+        <div style={{background:"#0c1a28", padding:"12px 16px", display:"flex", alignItems:"center", gap:12, borderBottom:"1px solid #1a3050"}}>
+          <button onClick={() => setDiaDetalle(null)} style={{background:"transparent", border:"1px solid #1e3348", color:"#00d4aa", borderRadius:8, padding:"6px 12px", fontSize:13, cursor:"pointer", fontWeight:700}}>← Volver</button>
+          <span style={{fontWeight:700}}>📅 Detalle del {diaDetalle}</span>
+        </div>
+        <div style={c.page}>
+          <div style={c.card}>
+            <div style={c.cTit}>📊 Resumen</div>
+            <div style={c.row}><span style={{color:"#4a6580"}}>Total ventas</span><strong style={{color:"#00d4aa"}}>{fmt(totalDia)}</strong></div>
+            <div style={c.row}><span style={{color:"#4a6580"}}>Total costos</span><strong style={{color:"#f87171"}}>{fmt(costosDia)}</strong></div>
+            <div style={{...c.row,borderBottom:"none"}}><span style={{color:"#4a6580"}}>Margen bruto</span><strong style={{color:"#60a5fa"}}>{fmt(totalDia-costosDia)}</strong></div>
+          </div>
+          <div style={c.card}>
+            <div style={c.cTit}>🧾 Ventas del día <span style={c.bdg("#00d4aa")}>{datos.ventas.length} ítems</span></div>
+            {datos.ventas.length===0?<div style={c.emp}>Sin datos guardados</div>:datos.ventas.map((v,i) => (
+              <div key={i} style={{...c.row, alignItems:"flex-start"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:600}}>{v.cantidad>1?`${v.cantidad}x `:""}{v.nombre}</div>
+                  <div style={{fontSize:11, color:"#4a6580"}}>🕐 {v.hora} · 👤 <span style={{color:"#60a5fa"}}>{v.quien}</span></div>
+                </div>
+                <span style={{color:"#00d4aa", fontWeight:700}}>{fmt(v.precio*v.cantidad)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const TABS = [{id:"ventas",icon:"💊",label:"VENTAS"},{id:"faltantes",icon:"📦",label:"FALTANTES"},{id:"fondos",icon:"💰",label:"FONDOS"},{id:"cierre",icon:"📊",label:"CIERRE"},{id:"historial",icon:"📅",label:"HISTORIAL"}];
+
+  return (
+    <div style={c.app}>
+      {toast && <Toast msg={toast} onDone={() => setToast(null)} />}
+
+      <div style={{background:"#0c1a28", padding:"7px 16px", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:"1px solid #1a3050"}}>
+        <span style={{fontSize:13, display:"flex", alignItems:"center", gap:8}}>
+          👤 <strong style={{color:"#00d4aa"}}>{usuario}</strong>
+          {estadoGuardado === "guardando" && <span style={{fontSize:10, color:"#f59e0b"}}>💾 guardando...</span>}
+          {estadoGuardado === "ok" && <span style={{fontSize:10, color:"#00d4aa"}}>✅ guardado</span>}
+          {estadoGuardado === "error" && <span style={{fontSize:10, color:"#f87171", fontWeight:700}}>⚠️ SIN GUARDAR</span>}
+        </span>
+        <button onClick={() => { setUsuario(null); set(KEYS.user, null); }} style={{background:"transparent", border:"1px solid #1e3348", color:"#4a6580", borderRadius:8, padding:"3px 10px", fontSize:11, cursor:"pointer"}}>Cambiar nombre</button>
+      </div>
+
+      <div style={{background:"#152030", padding:"4px 16px", textAlign:"center", fontSize:10, color:"#4a6580", borderBottom:"1px solid #1a3050", letterSpacing:0.5}}>
+        🏷️ Versión: <strong style={{color:"#60a5fa"}}>{VERSION}</strong>
+      </div>
+
+      {estadoGuardado === "error" && (
+        <div style={{background:"#ef4444", color:"#0a1520", padding:"8px 16px", fontSize:12, fontWeight:700, display:"flex", justifyContent:"space-between", alignItems:"center", gap:10}}>
+          <span>⚠️ La última venta no se guardó.</span>
+        </div>
+      )}
+
+      {mostrarAlerta && (
+        <div onClick={() => setTab("ventas")} style={{
+          background: nivelAlerta === "alto" ? "#ef4444" : "#f59e0b",
+          color: "#0a1520", padding: "10px 16px", display: "flex", alignItems: "center",
+          justifyContent: "space-between", cursor: "pointer", fontWeight: 700, fontSize: 13,
+        }}>
+          <span>⏰ {minsUltimaVenta >= 60 ? `${Math.floor(minsUltimaVenta/60)}h ${minsUltimaVenta%60}m` : `${minsUltimaVenta}m`} sin registrar una venta</span>
+          <span style={{textDecoration:"underline"}}>Registrar ahora →</span>
+        </div>
+      )}
+
+      <div style={{display:"flex", background:"#0f1e30", borderBottom:"2px solid #1a3050", position:"sticky", top:0, zIndex:50}}>
+        {TABS.map(t => (
+          <div key={t.id} onClick={() => setTab(t.id)} style={{flex:1, padding:"12px 4px", textAlign:"center", fontSize:10, fontWeight:700, color:tab===t.id?"#00d4aa":"#4a6580", cursor:"pointer", borderBottom:tab===t.id?"3px solid #00d4aa":"3px solid transparent"}}>
+            <div style={{fontSize:18, marginBottom:2}}>{t.icon}</div>{t.label}
+          </div>
+        ))}
+      </div>
+
+      {/* ══ VENTAS ══ */}
+      {tab === "ventas" && (
+        <div style={c.page}>
+          <div style={c.hdr}>
+            <div style={c.h2}>💊 Ventas del día</div>
+            <div style={c.sub}>{fechaLarga()}</div>
+            {lastVentaTs && (
+              <div style={{marginTop:8, fontSize:12, color: minsUltimaVenta >= 90 ? "#f59e0b" : "#4a6580"}}>
+                🕐 Última venta hace {minsUltimaVenta >= 60 ? `${Math.floor(minsUltimaVenta/60)}h ${minsUltimaVenta%60}m` : `${minsUltimaVenta}m`}
+              </div>
+            )}
+          </div>
+
+          <div style={c.tip("#00d4aa")}>
+            <strong style={{color:"#00d4aa"}}>📝 Recuerda:</strong> pasa aquí las ventas de tu cuaderno apenas puedas — medicinas o snacks/bebidas, todo en el mismo registro.
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>➕ Nueva venta</div>
+            <label style={c.lbl}>Producto</label>
+            <input style={c.inp} placeholder="Ej: Paracetamol 500mg / Galleta soda / Inca Kola" value={vNom} onChange={e => setVNom(e.target.value)} />
+            <div style={c.g3}>
+              <div><label style={c.lbl}>Precio venta</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={vPre} onChange={e => setVPre(e.target.value)} /></div>
+              <div><label style={c.lbl}>Costo</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={vCos} onChange={e => setVCos(e.target.value)} /></div>
+              <div><label style={c.lbl}>Cantidad</label><input style={c.inp} type="number" inputMode="decimal" placeholder="1" value={vCan} onChange={e => setVCan(e.target.value)} /></div>
+            </div>
+            <button style={c.btn} onClick={addVenta}>+ Agregar venta</button>
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>🧾 Ventas de hoy <span style={c.bdg("#00d4aa")}>{ventasHoy.length} ítems</span></div>
+            {ventasHoy.length===0?<div style={c.emp}>Sin ventas hoy aún</div>:ventasHoy.map((v,i) => (
+              <div key={i} style={{...c.row, alignItems:"flex-start"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:600}}>{v.cantidad>1?`${v.cantidad}x `:""}{v.nombre}</div>
+                  <div style={{fontSize:11, color:"#4a6580"}}>🕐 {v.hora} · 👤 <span style={{color:"#60a5fa"}}>{v.quien}</span></div>
+                  {v.costo>0 && <div style={{fontSize:11, color:"#4a6580"}}>costo: {fmt(v.costo*v.cantidad)} · margen: <span style={{color:"#60a5fa"}}>{fmt(v.precio*v.cantidad - v.costo*v.cantidad)}</span></div>}
+                </div>
+                <div style={{display:"flex", alignItems:"center", gap:8}}>
+                  <span style={{color:"#00d4aa", fontWeight:700}}>{fmt(v.precio*v.cantidad)}</span>
+                  <button style={c.btnX} onClick={() => eliminarVenta(v)}>✕</button>
+                </div>
+              </div>
+            ))}
+            {ventasHoy.length>0 && (
+              <div style={{marginTop:12, paddingTop:12, borderTop:"1px solid #1a3050"}}>
+                <div style={c.row}><span style={{color:"#4a6580"}}>Total ventas</span><strong style={{color:"#00d4aa"}}>{fmt(tV)}</strong></div>
+                <div style={c.row}><span style={{color:"#4a6580"}}>Total costos</span><strong style={{color:"#f87171"}}>{fmt(tC)}</strong></div>
+                <div style={{...c.row,borderBottom:"none"}}><span style={{color:"#4a6580"}}>Margen bruto</span><strong style={{color:"#60a5fa"}}>{fmt(tV-tC)}</strong></div>
+              </div>
+            )}
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>💸 Gastos del día</div>
+            <label style={c.lbl}>Descripción</label>
+            <input style={c.inp} placeholder="Ej: Compra de mercadería" value={gNom} onChange={e => setGNom(e.target.value)} />
+            <label style={c.lbl}>Monto (S/)</label>
+            <input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={gMon} onChange={e => setGMon(e.target.value)} />
+            <button style={c.btn} onClick={addGasto}>+ Agregar gasto</button>
+            {gastos.map((g,i) => (
+              <div key={i} style={c.row}>
+                <div><div style={{fontWeight:500}}>{g.nombre}</div><div style={{fontSize:11, color:"#4a6580"}}>🕐 {g.hora} · 👤 <span style={{color:"#60a5fa"}}>{g.quien}</span></div></div>
+                <div style={{display:"flex", alignItems:"center", gap:8}}><span style={{color:"#f87171", fontWeight:700}}>{fmt(g.monto)}</span><button style={c.btnX} onClick={() => setGastos(p => p.filter((_,j) => j!==i))}>✕</button></div>
+              </div>
+            ))}
+            {gastos.length>0 && <div style={{...c.row,borderBottom:"none",marginTop:8}}><span style={{color:"#4a6580"}}>Total gastos</span><strong style={{color:"#f87171"}}>{fmt(tG)}</strong></div>}
+          </div>
+        </div>
+      )}
+
+      {/* ══ FALTANTES ══ */}
+      {tab === "faltantes" && (
+        <div style={c.page}>
+          <div style={c.hdr}><div style={c.h2}>📦 Faltantes</div><div style={c.sub}>Lo que hay que reponer</div></div>
+
+          <div style={{display:"flex", gap:8, marginBottom:16}}>
+            <div style={c.segTab(faltSeccion==="botica")} onClick={() => setFaltSeccion("botica")}>💊 Botica</div>
+            <div style={c.segTab(faltSeccion==="tienda")} onClick={() => setFaltSeccion("tienda")}>🍪 Tienda</div>
+          </div>
+
+          <div style={c.tip(faltSeccion==="botica"?"#00d4aa":"#f59e0b")}>
+            {faltSeccion==="botica"
+              ? <><strong style={{color:"#00d4aa"}}>💊 Botica</strong> — medicinas, insumos farmacéuticos</>
+              : <><strong style={{color:"#f59e0b"}}>🍪 Tienda</strong> — galletas, gaseosas, aguas, golosinas</>}
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>➕ Agregar a faltantes ({faltSeccion==="botica"?"Botica":"Tienda"})</div>
+            <input
+              style={c.inp}
+              placeholder={faltSeccion==="botica" ? "Ej: Paracetamol 500mg" : "Ej: Galleta soda, Inca Kola 500ml"}
+              value={faltNom}
+              onChange={e => setFaltNom(e.target.value)}
+              onKeyDown={e => e.key==="Enter" && addFaltante()}
+            />
+            <button style={c.btn} onClick={addFaltante}>+ Agregar faltante</button>
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>
+              📋 Lista de faltantes
+              <span style={c.bdg(faltSeccion==="botica"?"#00d4aa":"#f59e0b")}>
+                {(faltSeccion==="botica"?faltantesBotica:faltantesTienda).length} ítems
+              </span>
+            </div>
+            {(faltSeccion==="botica"?faltantesBotica:faltantesTienda).length === 0 ? (
+              <div style={c.emp}>Sin faltantes en {faltSeccion==="botica"?"Botica":"Tienda"} 🎉</div>
+            ) : (faltSeccion==="botica"?faltantesBotica:faltantesTienda).map((f,i) => (
+              <div key={i} style={c.row}>
+                <div>
+                  <div style={{fontWeight:600}}>{f.nombre}</div>
+                  <div style={{fontSize:11, color:"#4a6580"}}>🕐 {f.hora} · 👤 <span style={{color:"#60a5fa"}}>{f.quien}</span></div>
+                </div>
+                <button style={c.btnCheck} onClick={() => quitarFaltante(f, faltSeccion)}>✓ Ya compré</button>
+              </div>
+            ))}
+          </div>
+
+          {(faltantesBotica.length > 0 || faltantesTienda.length > 0) && (
+            <div style={c.tip("#60a5fa")}>
+              📊 Total pendiente: <strong style={{color:"#00d4aa"}}>{faltantesBotica.length}</strong> en Botica ·
+              <strong style={{color:"#f59e0b"}}> {faltantesTienda.length}</strong> en Tienda
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ CIERRE ══ */}
+      {/* ══ FONDOS ══ */}
+      {tab === "fondos" && (
+        <div style={c.page}>
+          <div style={c.hdr}><div style={c.h2}>💰 Fondos</div><div style={c.sub}>Anota lo que cuentes — no calcula solo</div></div>
+
+          <div style={c.tip("#60a5fa")}>
+            <strong style={{color:"#60a5fa"}}>💡 Cómo usar esto</strong><br/>
+            Cuando cuentes tu efectivo físico (agente o botica), anótalo aquí. Queda guardado con fecha para que veas cómo cambió día a día. Esto NO calcula solo — el conteo real siempre lo haces tú.
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>🏦 Fondo Agente</div>
+            <div style={c.g2}>
+              <div><label style={c.lbl}>En cuenta (S/)</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={fAgenteCuenta} onChange={e => setFAgenteCuenta(e.target.value)} /></div>
+              <div><label style={c.lbl}>En efectivo (S/)</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={fAgenteEfvo} onChange={e => setFAgenteEfvo(e.target.value)} /></div>
+            </div>
+            {(fAgenteCuenta || fAgenteEfvo) && (
+              <div style={c.tip("#00d4aa")}>Total agente: <strong style={{color:"#00d4aa"}}>{fmt((+fAgenteCuenta||0) + (+fAgenteEfvo||0))}</strong></div>
+            )}
+          </div>
+
+          <div style={c.card}>
+            <div style={c.cTit}>🟩 Caja Botica/Tienda</div>
+            <label style={c.lbl}>Efectivo contado (S/)</label>
+            <input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={fBotica} onChange={e => setFBotica(e.target.value)} />
+            <div style={c.g2}>
+              <div><label style={c.lbl}>Yape Lucy (S/)</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={fYapeLucy} onChange={e => setFYapeLucy(e.target.value)} /></div>
+              <div><label style={c.lbl}>Yape Hugo (S/)</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={fYapeHugo} onChange={e => setFYapeHugo(e.target.value)} /></div>
+            </div>
+            {(fBotica || fYapeLucy || fYapeHugo) && (
+              <div style={c.tip("#f59e0b")}>Total botica (efectivo + Yapes): <strong style={{color:"#f59e0b"}}>{fmt((+fBotica||0) + (+fYapeLucy||0) + (+fYapeHugo||0))}</strong></div>
+            )}
+          </div>
+
+          <button style={c.btn} onClick={registrarFondos}>💾 Guardar este conteo</button>
+
+          <div style={c.card}>
+            <div style={c.cTit}>📋 Historial de conteos <span style={c.bdg("#60a5fa")}>{fondosHist.length}</span></div>
+            {fondosHist.length===0?<div style={c.emp}>Aún no has guardado ningún conteo</div>:fondosHist.map((f,i) => (
+              <div key={i} style={{...c.row, alignItems:"flex-start"}}>
+                <div>
+                  <div style={{fontWeight:600}}>{f.fecha} · {f.hora}</div>
+                  <div style={{fontSize:11, color:"#4a6580"}}>👤 <span style={{color:"#60a5fa"}}>{f.quien}</span></div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{color:"#00d4aa", fontWeight:700}}>Agente: {fmt(f.agenteTotal)}</div>
+                  <div style={{fontSize:11, color:"#7a9fc0"}}>({fmt(f.agenteCuenta)} cta + {fmt(f.agenteEfvo)} efvo)</div>
+                  <div style={{color:"#f59e0b", fontWeight:700, marginTop:4}}>Botica: {fmt(f.boticaTotal !== undefined ? f.boticaTotal : f.botica)}</div>
+                  {(f.yapeLucy > 0 || f.yapeHugo > 0) && (
+                    <div style={{fontSize:11, color:"#7a9fc0"}}>({fmt(f.botica)} efvo + Yape L:{fmt(f.yapeLucy||0)} H:{fmt(f.yapeHugo||0)})</div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+
+        <div style={c.page}>
+          <div style={c.hdr}><div style={c.h2}>📊 Cierre del día</div><div style={c.sub}>{fechaLarga()}</div></div>
+          <div style={c.card}>
+            <div style={c.cTit}>💳 Gastos personales hoy</div>
+            <div style={c.g2}>
+              <div><label style={c.lbl}>Pagos TC / deudas</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={cTC} onChange={e => setCTC(e.target.value)} /></div>
+              <div><label style={c.lbl}>Otros gastos</label><input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={cOtr} onChange={e => setCOtr(e.target.value)} /></div>
+            </div>
+          </div>
+          <button style={c.btn} onClick={calcCierre}>⚡ CALCULAR CIERRE</button>
+          {cierre && <>
+            <div style={c.card}>
+              <div style={c.cTit}>📋 Desglose</div>
+              {[["Ventas (hoy)",cierre.tV,"#00d4aa"],["Costos productos",cierre.tC,"#f87171"],["Margen bruto",cierre.margen,"#60a5fa"],["Gastos",cierre.tG,"#f87171"],["Pagos TC",cierre.tc,"#f87171"],["Otros gastos",cierre.otr,"#f87171"]].map(([lbl,val,clr]) => (
+                <div key={lbl} style={c.row}><span style={{color:"#4a6580"}}>{lbl}</span><strong style={{color:clr}}>{fmt(val)}</strong></div>
+              ))}
+            </div>
+            <div style={c.big(cierre.gan>=0)}>
+              <div style={c.bigL(cierre.gan>=0)}>{cierre.gan>=0?"✅ GANANCIA NETA DEL DÍA":"⚠️ PÉRDIDA DEL DÍA"}</div>
+              <div style={c.bigN(cierre.gan>=0)}>{fmt(cierre.gan)}</div>
+            </div>
+            <button style={c.btn} onClick={guardarDia}>💾 Guardar cierre de hoy</button>
+            <div style={c.tip("#00d4aa")}>
+              ✅ Puedes cerrar las veces que quieras. Si vendes algo después de cerrar, vuelve a tocar el botón y el día se <strong style={{color:"#00d4aa"}}>actualiza sumando</strong> — ya no se borra nada.
+            </div>
+          </>}
+          <button style={{...c.btnS, fontSize:11, opacity:0.6}} onClick={() => setModalNuevoDia(true)}>🔒 Borrar ventas de hoy sin guardar (emergencia)</button>
+        </div>
+      )}
+
+      {/* ══ HISTORIAL ══ */}
+      {tab === "historial" && (
+        <div style={c.page}>
+          <div style={c.hdr}><div style={c.h2}>📅 Historial</div><div style={c.sub}>Toca un día para ver sus ventas</div></div>
+          {historial.length>0 && (
+            <div style={c.card}>
+              <div style={c.cTit}>📈 Resumen del mes</div>
+              <div style={c.row}><span style={{color:"#4a6580"}}>Días registrados</span><strong>{historial.length}</strong></div>
+              <div style={c.row}><span style={{color:"#4a6580"}}>Total ganado</span><strong style={{color:"#00d4aa"}}>{fmt(tMes)}</strong></div>
+              <div style={c.row}><span style={{color:"#4a6580"}}>Promedio diario</span><strong style={{color:"#60a5fa"}}>{fmt(prom)}</strong></div>
+              <div style={{...c.row,borderBottom:"none"}}><span style={{color:"#4a6580"}}>Mejor día</span><strong style={{color:"#00d4aa"}}>{fmt(mejor)}</strong></div>
+            </div>
+          )}
+          <div style={c.card}>
+            <div style={c.cTit}>📋 Días guardados</div>
+            {historial.length===0?<div style={c.emp}>Aún no hay días guardados</div>:historial.map((h,i) => {
+              const g=parseFloat(h.gan);
+              const tieneDetalle = ventasHist[h.fecha];
+              return (
+                <div key={i} style={{...c.row, cursor:"pointer"}} onClick={() => tieneDetalle && setDiaDetalle(h.fecha)}>
+                  <div>
+                    <div style={{fontWeight:600}}>{h.fecha} {tieneDetalle && <span style={{fontSize:10, color:"#60a5fa", marginLeft:6}}>ver ventas →</span>}</div>
+                    <div style={{fontSize:11, color:"#2a4060"}}>{h.items} ítems · ventas {fmt(parseFloat(h.ventas||0))}</div>
+                  </div>
+                  <span style={{fontWeight:700, color:g>=0?"#00d4aa":"#f87171"}}>{fmt(g)}</span>
+                </div>
+              );
+            })}
+          </div>
+          {historial.length>0 && (
+            <button style={c.btnS} onClick={() => { if(window.confirm("¿Borrar todo el historial?")) { setHistorial([]); setVentasHist({}); set(KEYS.hist,[]); set(KEYS.ventasHist,{}); }}}>
+              🗑️ Borrar historial
+            </button>
+          )}
+        </div>
+      )}
+
+      {modalNuevoDia && (
+        <div style={{position:"fixed", inset:0, background:"#000000cc", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:24}}>
+          <div style={{background:"#152030", borderRadius:16, padding:24, width:"100%", maxWidth:320, border:"1px solid #1e3348"}}>
+            <div style={{fontSize:15, fontWeight:800, color:"#f87171", marginBottom:8}}>⚠️ Borrar ventas de hoy</div>
+            <div style={{fontSize:12, color:"#7a9fc0", marginBottom:16, lineHeight:1.5}}>Esto borra sin guardar en historial. Clave:</div>
+            <input
+              style={{...c.inp, textAlign:"center", fontSize:20, letterSpacing:4}}
+              type="tel" inputMode="numeric" placeholder="••••" maxLength={4}
+              value={claveInput}
+              onChange={e => { setClaveInput(e.target.value); setClaveError(false); }}
+              onKeyDown={e => e.key === "Enter" && confirmarNuevoDia()}
+              autoFocus
+            />
+            {claveError && <div style={{color:"#f87171", fontSize:12, marginBottom:8, textAlign:"center"}}>❌ Clave incorrecta</div>}
+            <button style={{...c.btn, background:"#ef4444", marginTop:8}} onClick={confirmarNuevoDia}>Confirmar borrado</button>
+            <button style={c.btnS} onClick={() => { setModalNuevoDia(false); setClaveInput(""); setClaveError(false); }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ====================== FIN DE TU COMPONENTE ====================== */
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Brasalud />);
+document.getElementById('carga').style.display = 'none';
+</script>
+
+<script>
+/* ---- Pantalla siempre encendida (Wake Lock) ---- */
+(function () {
+  const btn = document.getElementById('btnLuz');
+  let lock = null;
+  let quiere = false;
+
+  if (!('wakeLock' in navigator)) {
+    btn.style.display = 'none';
+    return;
+  }
+
+  async function tomar() {
+    try {
+      lock = await navigator.wakeLock.request('screen');
+      lock.addEventListener('release', () => { lock = null; });
+      btn.dataset.on = '1';
+    } catch (e) {
+      quiere = false;
+      btn.dataset.on = '0';
+      console.log('Wake lock rechazado:', e);
+    }
+  }
+
+  async function soltar() {
+    if (lock) { await lock.release(); lock = null; }
+    btn.dataset.on = '0';
+  }
+
+  btn.addEventListener('click', () => {
+    quiere = !quiere;
+    quiere ? tomar() : soltar();
+  });
+
+  // Android suelta el lock al cambiar de app: hay que volver a pedirlo.
+  document.addEventListener('visibilitychange', () => {
+    if (quiere && !lock && document.visibilityState === 'visible') tomar();
+  });
+
+  // Recordar la eleccion entre sesiones
+  try {
+    if (localStorage.getItem('brasalud_luz') === '1') {
+      quiere = true;
+      tomar();
+    }
+    btn.addEventListener('click', () => {
+      localStorage.setItem('brasalud_luz', quiere ? '1' : '0');
+    });
+  } catch (e) {}
+})();
+
+/* ---- Service worker: la app abre sin internet ---- */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch((e) => console.log('SW:', e));
+  });
+}
+
+/* ---- Aviso antes de cerrar si hay algo escrito sin guardar ---- */
+window.addEventListener('beforeunload', (e) => {
+  const campos = document.querySelectorAll('input[type="text"], input[type="number"]');
+  for (const c of campos) {
+    if (c.value && c.value !== '0' && c.value !== '0.00' && c.value !== '1') {
+      e.preventDefault();
+      e.returnValue = '';
+      return;
+    }
+  }
+});
+</script>
+
+</body>
+</html>
