@@ -79,7 +79,7 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 //  v9 — Sin agente BCP, con Faltantes (Botica/Tienda)
 // ═══════════════════════════════════════════════
 
-const VERSION = "v13 · gastos visibles en el historial";
+const VERSION = "v14 · respaldo y traspaso entre celulares";
 
 const KEYS = {
   ventas: "bs_ventas", gastos: "bs_gastos",
@@ -438,6 +438,64 @@ function Brasalud() {
     setVentasHist(p => ({ ...p, [fecha]: { ventas: [...ventasDeEseDia], gastos: [...gastosDeEseDia] } }));
     if (!silencioso) msg("💾 Día guardado — puedes seguir vendiendo, se actualiza solo");
     return ganf;
+  };
+
+  // ══ RESPALDO: exportar / importar todo ══
+  const exportarRespaldo = async () => {
+    const bulto = { app: "brasalud", version: 1, fecha: fechaHoy(), datos: {} };
+    for (const k of Object.values(KEYS)) {
+      const crudo = localStorage.getItem(k);
+      if (crudo !== null) bulto.datos[k] = crudo;
+    }
+    const texto = JSON.stringify(bulto);
+    const nombre = "brasalud-respaldo-" + fechaHoy().split("/").join("-") + ".json";
+    try {
+      const blob = new Blob([texto], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = nombre;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      msg("📤 Respaldo descargado — mándalo por WhatsApp");
+    } catch (e) {
+      msg("⚠️ No se pudo descargar, usa Copiar");
+    }
+  };
+
+  const copiarRespaldo = async () => {
+    const bulto = { app: "brasalud", version: 1, fecha: fechaHoy(), datos: {} };
+    for (const k of Object.values(KEYS)) {
+      const crudo = localStorage.getItem(k);
+      if (crudo !== null) bulto.datos[k] = crudo;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(bulto));
+      msg("📋 Copiado — pégalo en WhatsApp");
+    } catch (e) {
+      msg("⚠️ No se pudo copiar");
+    }
+  };
+
+  const aplicarRespaldo = (texto) => {
+    let bulto;
+    try { bulto = JSON.parse(texto); }
+    catch (e) { msg("❌ El texto no es un respaldo válido"); return; }
+    if (!bulto || bulto.app !== "brasalud" || !bulto.datos) { msg("❌ No es un respaldo de Brasalud"); return; }
+    const cuantas = Object.keys(bulto.datos).length;
+    if (!window.confirm("Esto REEMPLAZA todos los datos de este celular por los del respaldo del " + (bulto.fecha||"?") + ".\n\n¿Continuar?")) return;
+    for (const [k, v] of Object.entries(bulto.datos)) localStorage.setItem(k, v);
+    alert("✅ Respaldo restaurado (" + cuantas + " bloques). La app se va a reiniciar.");
+    location.reload();
+  };
+
+  const leerArchivoRespaldo = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => aplicarRespaldo(String(r.result));
+    r.onerror = () => msg("❌ No se pudo leer el archivo");
+    r.readAsText(f);
+    e.target.value = "";
   };
 
   const guardarDia = () => {
@@ -862,6 +920,20 @@ function Brasalud() {
                 </div>
               );
             })}
+          </div>
+          <div style={c.card}>
+            <div style={c.cTit}>💾 Respaldo</div>
+            <div style={{fontSize:11, color:"#4a6580", lineHeight:1.5, marginBottom:10}}>
+              Guarda TODO (ventas, historial, faltantes, fondos) en un archivo. Sirve para pasar el sistema a otro celular o para no perderlo si algo le pasa a este.
+            </div>
+            <button style={c.btn} onClick={exportarRespaldo}>📤 Descargar respaldo</button>
+            <button style={{...c.btnS, marginTop:8}} onClick={copiarRespaldo}>📋 Copiar respaldo como texto</button>
+            <button style={{...c.btnS, marginTop:8}} onClick={() => document.getElementById("archivoRespaldo").click()}>📥 Restaurar desde archivo</button>
+            <button style={{...c.btnS, marginTop:8}} onClick={() => { const t = window.prompt("Pega aquí el texto del respaldo:"); if (t) aplicarRespaldo(t); }}>📥 Restaurar pegando texto</button>
+            <input id="archivoRespaldo" type="file" accept=".json,application/json,text/plain" style={{display:"none"}} onChange={leerArchivoRespaldo} />
+            <div style={c.tip("#f87171")}>
+              ⚠️ Restaurar <strong style={{color:"#f87171"}}>reemplaza</strong> todo lo que haya en este celular. No mezcla.
+            </div>
           </div>
           {historial.length>0 && (
             <button style={c.btnS} onClick={() => { if(window.confirm("¿Borrar todo el historial?")) { setHistorial([]); setVentasHist({}); set(KEYS.hist,[]); set(KEYS.ventasHist,{}); }}}>
