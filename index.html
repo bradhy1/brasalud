@@ -79,7 +79,7 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 //  v9 — Sin agente BCP, con Faltantes (Botica/Tienda)
 // ═══════════════════════════════════════════════
 
-const VERSION = "v11 · cierre automático y sin pérdida";
+const VERSION = "v13 · gastos visibles en el historial";
 
 const KEYS = {
   ventas: "bs_ventas", gastos: "bs_gastos",
@@ -175,7 +175,7 @@ function Brasalud() {
       if (datos) {
         const [v, g, h, u, vh, fb, ft, fh] = datos;
         if (v) setVentas(v);
-        if (g) setGastos(g);
+        if (g) setGastos(g.map(x => x.fecha ? x : { ...x, fecha: fechaHoy() }));
         if (u) setUsuario(u);
         if (fb) setFaltantesBotica(fb);
         if (ft) setFaltantesTienda(ft);
@@ -279,15 +279,19 @@ function Brasalud() {
     let cerrados = 0;
     fechasPendientes.forEach(f => {
       const ventasDeEsaFecha = ventas.filter(v => v.fecha === f);
+      const gastosDeEsaFecha = gastos.filter(g => g.fecha === f);
       // si ya está en el historial con el mismo número de ítems, no lo re-cierra
       const yaEnHist = historial.find(h => h.fecha === f);
       if (yaEnHist && Number(yaEnHist.items) === ventasDeEsaFecha.length) return;
-      guardarCierreDeFecha(f, ventasDeEsaFecha, [], 0, 0, true);
+      guardarCierreDeFecha(f, ventasDeEsaFecha, gastosDeEsaFecha, 0, 0, true);
       cerrados++;
     });
-    if (cerrados > 0) msg(`🌙 ${cerrados} día(s) anterior(es) cerrado(s) automáticamente`);
+    if (cerrados > 0) {
+      setGastos(p => p.filter(g => g.fecha === hoy));
+      msg(`🌙 ${cerrados} día(s) anterior(es) cerrado(s) automáticamente`);
+    }
     setYaAutoCerro(true);
-  }, [yaInicializado, ventas, historial, yaAutoCerro]);
+  }, [yaInicializado, ventas, gastos, historial, yaAutoCerro]);
 
   const guardarConEstado = async (key, val) => {
     setEstadoGuardado("guardando");
@@ -355,7 +359,7 @@ function Brasalud() {
 
   const addGasto = () => {
     if (!gNom || !gMon) return msg("⚠️ Ingresa descripción y monto");
-    setGastos(p => [{ nombre: gNom, monto: +gMon, hora: hora(), quien: usuario }, ...p]);
+    setGastos(p => [{ nombre: gNom, monto: +gMon, hora: hora(), quien: usuario, fecha: fechaHoy() }, ...p]);
     setGNom(""); setGMon(""); msg("✅ Gasto registrado");
   };
 
@@ -411,7 +415,7 @@ function Brasalud() {
     const hoyV = ventas.filter(v => v.fecha === fechaHoy());
     const tV = hoyV.reduce((s,v) => s + v.precio * v.cantidad, 0);
     const tC = hoyV.reduce((s,v) => s + v.costo * v.cantidad, 0);
-    const tG = gastos.reduce((s,g) => s + g.monto, 0);
+    const tG = gastos.filter(g => g.fecha === fechaHoy()).reduce((s,g) => s + g.monto, 0);
     const tc = +cTC||0, otr = +cOtr||0;
     setCierre({ tV, tC, tG, tc, otr, margen: tV-tC, gan: tV-tC-tG-tc-otr, itemsHoy: hoyV.length, hoyV });
   };
@@ -440,7 +444,7 @@ function Brasalud() {
     if (!cierre) return;
     const fecha = fechaHoy();
     const ventasDelDia = ventas.filter(v => v.fecha === fecha);
-    guardarCierreDeFecha(fecha, ventasDelDia, gastos, cTC, cOtr, false);
+    guardarCierreDeFecha(fecha, ventasDelDia, gastos.filter(g => g.fecha === fecha), cTC, cOtr, false);
     setCierre(null);
     setTab("historial");
   };
@@ -457,7 +461,8 @@ function Brasalud() {
   const ventasHoy = ventas.filter(v => v.fecha === fechaHoy());
   const tV = ventasHoy.reduce((s,v) => s + v.precio * v.cantidad, 0);
   const tC = ventasHoy.reduce((s,v) => s + v.costo * v.cantidad, 0);
-  const tG = gastos.reduce((s,g) => s + g.monto, 0);
+  const gastosHoy = gastos.filter(g => g.fecha === fechaHoy());
+  const tG = gastosHoy.reduce((s,g) => s + g.monto, 0);
   const tMes = historial.reduce((s,h) => s + parseFloat(h.gan), 0);
   const prom = historial.length ? tMes / historial.length : 0;
   const mejor = historial.length ? Math.max(...historial.map(h => parseFloat(h.gan))) : 0;
@@ -515,6 +520,8 @@ function Brasalud() {
     const datos = ventasHist[diaDetalle] || { ventas: [], gastos: [] };
     const totalDia = datos.ventas.reduce((s,v) => s + v.precio * v.cantidad, 0);
     const costosDia = datos.ventas.reduce((s,v) => s + v.costo * v.cantidad, 0);
+    const listaGastos = datos.gastos || [];
+    const gastosDia = listaGastos.reduce((s,g) => s + g.monto, 0);
     return (
       <div style={c.app}>
         <div style={{background:"#0c1a28", padding:"12px 16px", display:"flex", alignItems:"center", gap:12, borderBottom:"1px solid #1a3050"}}>
@@ -526,7 +533,9 @@ function Brasalud() {
             <div style={c.cTit}>📊 Resumen</div>
             <div style={c.row}><span style={{color:"#4a6580"}}>Total ventas</span><strong style={{color:"#00d4aa"}}>{fmt(totalDia)}</strong></div>
             <div style={c.row}><span style={{color:"#4a6580"}}>Total costos</span><strong style={{color:"#f87171"}}>{fmt(costosDia)}</strong></div>
-            <div style={{...c.row,borderBottom:"none"}}><span style={{color:"#4a6580"}}>Margen bruto</span><strong style={{color:"#60a5fa"}}>{fmt(totalDia-costosDia)}</strong></div>
+            <div style={c.row}><span style={{color:"#4a6580"}}>Margen bruto</span><strong style={{color:"#60a5fa"}}>{fmt(totalDia-costosDia)}</strong></div>
+            <div style={c.row}><span style={{color:"#4a6580"}}>Gastos del día</span><strong style={{color:"#f87171"}}>{fmt(gastosDia)}</strong></div>
+            <div style={{...c.row,borderBottom:"none"}}><span style={{color:"#4a6580"}}>Ganancia neta</span><strong style={{color:(totalDia-costosDia-gastosDia)>=0?"#00d4aa":"#f87171"}}>{fmt(totalDia-costosDia-gastosDia)}</strong></div>
           </div>
           <div style={c.card}>
             <div style={c.cTit}>🧾 Ventas del día <span style={c.bdg("#00d4aa")}>{datos.ventas.length} ítems</span></div>
@@ -539,6 +548,23 @@ function Brasalud() {
                 <span style={{color:"#00d4aa", fontWeight:700}}>{fmt(v.precio*v.cantidad)}</span>
               </div>
             ))}
+          </div>
+          <div style={c.card}>
+            <div style={c.cTit}>💸 Gastos del día <span style={c.bdg("#f87171")}>{listaGastos.length}</span></div>
+            {listaGastos.length===0
+              ? <div style={c.emp}>Sin gastos guardados de este día</div>
+              : <>
+                  {listaGastos.map((g,i) => (
+                    <div key={i} style={c.row}>
+                      <div>
+                        <div style={{fontWeight:600}}>{g.nombre}</div>
+                        <div style={{fontSize:11, color:"#4a6580"}}>🕐 {g.hora} · 👤 <span style={{color:"#60a5fa"}}>{g.quien}</span></div>
+                      </div>
+                      <span style={{color:"#f87171", fontWeight:700}}>{fmt(g.monto)}</span>
+                    </div>
+                  ))}
+                  <div style={{...c.row,borderBottom:"none",marginTop:8}}><span style={{color:"#4a6580"}}>Total gastos</span><strong style={{color:"#f87171"}}>{fmt(gastosDia)}</strong></div>
+                </>}
           </div>
         </div>
       </div>
@@ -650,13 +676,13 @@ function Brasalud() {
             <label style={c.lbl}>Monto (S/)</label>
             <input style={c.inp} type="number" inputMode="decimal" placeholder="0.00" value={gMon} onChange={e => setGMon(e.target.value)} />
             <button style={c.btn} onClick={addGasto}>+ Agregar gasto</button>
-            {gastos.map((g,i) => (
+            {gastosHoy.map((g,i) => (
               <div key={i} style={c.row}>
                 <div><div style={{fontWeight:500}}>{g.nombre}</div><div style={{fontSize:11, color:"#4a6580"}}>🕐 {g.hora} · 👤 <span style={{color:"#60a5fa"}}>{g.quien}</span></div></div>
-                <div style={{display:"flex", alignItems:"center", gap:8}}><span style={{color:"#f87171", fontWeight:700}}>{fmt(g.monto)}</span><button style={c.btnX} onClick={() => setGastos(p => p.filter((_,j) => j!==i))}>✕</button></div>
+                <div style={{display:"flex", alignItems:"center", gap:8}}><span style={{color:"#f87171", fontWeight:700}}>{fmt(g.monto)}</span><button style={c.btnX} onClick={() => setGastos(p => p.filter(x => x !== g))}>✕</button></div>
               </div>
             ))}
-            {gastos.length>0 && <div style={{...c.row,borderBottom:"none",marginTop:8}}><span style={{color:"#4a6580"}}>Total gastos</span><strong style={{color:"#f87171"}}>{fmt(tG)}</strong></div>}
+            {gastosHoy.length>0 && <div style={{...c.row,borderBottom:"none",marginTop:8}}><span style={{color:"#4a6580"}}>Total gastos</span><strong style={{color:"#f87171"}}>{fmt(tG)}</strong></div>}
           </div>
         </div>
       )}
