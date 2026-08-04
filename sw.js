@@ -2,7 +2,7 @@
    Sube el numero de CACHE cada vez que cambies index.html (v13, v14...)
    para que el celular tome la version nueva. */
 
-const CACHE = 'brasalud-v12';
+const CACHE = 'brasalud-v13';
 
 const ARCHIVOS = [
   './',
