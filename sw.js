@@ -1,8 +1,9 @@
 /* Brasalud - service worker
-   Sube el numero de CACHE cada vez que cambies index.html (v13, v14...)
-   para que el celular tome la version nueva. */
+   v14: el index.html ahora se pide SIEMPRE a la red primero.
+   Asi, cuando subas una version nueva a GitHub, el celular la toma
+   sola al abrir la app. Si no hay internet, usa la copia guardada. */
 
-const CACHE = 'brasalud-v13';
+const CACHE = 'brasalud-v14';
 
 const ARCHIVOS = [
   './',
@@ -18,7 +19,6 @@ const ARCHIVOS = [
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE).then((c) =>
-      // addAll falla entero si un archivo falla; guardamos uno por uno
       Promise.all(
         ARCHIVOS.map((url) =>
           c.add(url).catch((err) => console.log('No se pudo cachear', url, err))
@@ -38,10 +38,35 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+// Mensaje desde la app para forzar la actualizacion
+self.addEventListener('message', (e) => {
+  if (e.data === 'actualizar') self.skipWaiting();
+});
+
+function esLaApp(req) {
+  return req.mode === 'navigate' || req.url.includes('index.html');
+}
+
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
 
-  // Cache primero: abre al instante y funciona sin señal.
+  // La app: RED PRIMERO. Siempre trae lo ultimo que subiste.
+  if (esLaApp(e.request)) {
+    e.respondWith(
+      fetch(e.request)
+        .then((resp) => {
+          const copia = resp.clone();
+          caches.open(CACHE).then((c) => c.put('./index.html', copia));
+          return resp;
+        })
+        .catch(() =>
+          caches.match('./index.html').then((r) => r || caches.match('./'))
+        )
+    );
+    return;
+  }
+
+  // Lo demas (iconos, React, Babel): guardado primero, es mas rapido.
   e.respondWith(
     caches.match(e.request).then((guardado) => {
       if (guardado) return guardado;
